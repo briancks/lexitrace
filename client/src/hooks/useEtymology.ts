@@ -1,6 +1,5 @@
 import { useState, useCallback } from 'react';
 import { EtymologyTree } from '../types/etymology';
-import { getMockEtymology } from '../data/mockEtymologies';
 
 interface UseEtymologyResult {
   etymology: EtymologyTree | null;
@@ -25,29 +24,19 @@ export function useEtymology(): UseEtymologyResult {
     setError(null);
 
     try {
-      // Simulate network delay
-      await new Promise(resolve => setTimeout(resolve, 800));
-
-      // First check mock data
-      const mockData = getMockEtymology(word);
+      // Call the backend API
+      const response = await fetch(`/api/etymology/${encodeURIComponent(word.trim())}`);
       
-      if (mockData) {
-        setEtymology(mockData);
-        return;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || errorData.error || 'Failed to fetch etymology');
       }
-
-      // TODO: Replace with actual API call when backend is ready
-      // const response = await fetch(`/api/etymology/${encodeURIComponent(word)}`);
-      // if (!response.ok) {
-      //   throw new Error('Failed to fetch etymology');
-      // }
-      // const data = await response.json();
-      // setEtymology(data);
-
-      // For now, show error for words not in mock data
-      setError(`Etymology for "${word}" not found. Try: Vlogger, Democracy, World, Podcast, or Television`);
+      
+      const data = await response.json();
+      setEtymology(data);
       
     } catch (err) {
+      console.error('Etymology fetch error:', err);
       setError(err instanceof Error ? err.message : 'An error occurred');
       setEtymology(null);
     } finally {

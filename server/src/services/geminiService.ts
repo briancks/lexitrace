@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
-import { EtymologyTree, LanguageFamily } from '../models/etymology.js';
+import { EtymologyTree } from '../models/etymology.js';
 
 const ETYMOLOGY_PROMPT = `You are an expert etymologist. Analyze the given word and create a detailed etymology tree tracing it back to its ancient roots (Proto-Indo-European, Proto-Germanic, Latin, Greek, etc.).
 
@@ -41,46 +41,69 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 
 Ensure the tree is historically accurate and follows proper linguistic derivation paths.`;
 
+const MODEL_NAME = 'gemini-2.5-flash';
+const PRIMARY_API_KEY = process.env.GEMINI_API_KEY || '';
+const BACKUP_API_KEY = 'AIzaSyDWd2TRGeyOsCL3t17os3AoBAUsV2qNUSg';
+
 export class GeminiService {
-  private model: GenerativeModel;
+  private primaryModel: GenerativeModel;
+  private backupModel: GenerativeModel;
   private apiKey: string;
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
-    const genAI = new GoogleGenerativeAI(apiKey);
-    this.model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+    
+    // Primary model with provided API key
+    const primaryGenAI = new GoogleGenerativeAI(apiKey);
+    this.primaryModel = primaryGenAI.getGenerativeModel({ model: MODEL_NAME });
+    
+    // Backup model with fallback API key
+    const backupGenAI = new GoogleGenerativeAI(BACKUP_API_KEY);
+    this.backupModel = backupGenAI.getGenerativeModel({ model: MODEL_NAME });
   }
 
   async parseEtymology(word: string, retries = 3): Promise<EtymologyTree> {
     const prompt = `${ETYMOLOGY_PROMPT}\n\nAnalyze this word: "${word}"`;
 
+    // Try primary API key first
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const result = await this.model.generateContent(prompt);
+        console.log(`Attempt ${attempt} with primary API key...`);
+        const result = await this.primaryModel.generateContent(prompt);
         const response = await result.response;
-        let text = response.text();
+        return this.parseResponse(response.text(), word);
+      } catch (error: any) {
+        console.error(`Primary attempt ${attempt} failed:`, error?.message || error);
         
-        // Clean up response - remove markdown code blocks if present
-        text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        
-        const parsed = JSON.parse(text) as EtymologyTree;
-        
-        // Validate structure
-        if (!parsed.root || !parsed.root.word || !parsed.metadata) {
-          throw new Error('Invalid etymology structure');
+        // If quota exceeded (429) or resource exhausted, try backup immediately
+        if (error?.status === 429 || error?.message?.includes('429') || 
+            error?.message?.includes('quota') || error?.message?.includes('RESOURCE_EXHAUSTED')) {
+          console.log('Primary quota exceeded, switching to backup API key...');
+          break; // Exit primary loop and try backup
         }
-        
-        // Add parsed timestamp if missing
-        if (!parsed.metadata.parsedAt) {
-          parsed.metadata.parsedAt = new Date().toISOString();
-        }
-        
-        return parsed;
-      } catch (error) {
-        console.error(`Attempt ${attempt} failed:`, error);
         
         if (attempt === retries) {
-          throw new Error(`Failed to parse etymology after ${retries} attempts: ${error}`);
+          // Try backup before giving up
+          break;
+        }
+        
+        // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+      }
+    }
+
+    // Try backup API key
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        console.log(`Attempt ${attempt} with backup API key...`);
+        const result = await this.backupModel.generateContent(prompt);
+        const response = await result.response;
+        return this.parseResponse(response.text(), word);
+      } catch (error: any) {
+        console.error(`Backup attempt ${attempt} failed:`, error?.message || error);
+        
+        if (attempt === retries) {
+          throw new Error(`Failed to parse etymology after all attempts: ${error?.message || error}`);
         }
         
         // Exponential backoff
@@ -89,6 +112,26 @@ export class GeminiService {
     }
 
     throw new Error('Unexpected error in parseEtymology');
+  }
+
+  private parseResponse(text: string, word: string): EtymologyTree {
+    // Clean up response - remove markdown code blocks if present
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    const parsed = JSON.parse(text) as EtymologyTree;
+    
+    // Validate structure
+    if (!parsed.root || !parsed.root.word || !parsed.metadata) {
+      throw new Error('Invalid etymology structure');
+    }
+    
+    // Add parsed timestamp if missing
+    if (!parsed.metadata.parsedAt) {
+      parsed.metadata.parsedAt = new Date().toISOString();
+    }
+    
+    console.log(`✓ Successfully parsed etymology for "${word}"`);
+    return parsed;
   }
 
   isConfigured(): boolean {
